@@ -31,7 +31,7 @@ jobs:
 
       - name: 버전 태그
         id: tag
-        run: echo "name=build-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+        run: echo "name=build-$(TZ=Asia/Seoul date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
       - name: 릴리스 업로드
         uses: softprops/action-gh-release@v2
