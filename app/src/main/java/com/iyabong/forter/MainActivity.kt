@@ -8,23 +8,36 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.iyabong.forter.ui.theme.ForterTheme
+
+// 발견된 BLE 기기 한 대를 표현하는 데이터
+data class ScannedDevice(
+    val name: String,
+    val address: String,
+    val rssi: Int,
+    val isTarget: Boolean
+)
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var bleScanner: BleScanner
 
-    // ── 스캔 결과를 UI에 넘겨줄 상태 ──────────────────────────────────
-    private val scanLogs = mutableStateListOf<String>()
+    // ── UI 상태 ────────────────────────────────────────────────────────
+    private val devices = mutableStateListOf<ScannedDevice>()   // 발견된 기기 목록
     private var isScanning = mutableStateOf(false)
+    private var statusText = mutableStateOf("스캔을 시작하세요")
 
     // ── 권한 요청 런처 ─────────────────────────────────────────────────
     private val permissionLauncher = registerForActivityResult(
@@ -32,10 +45,9 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val allGranted = permissions.all { it.value }
         if (allGranted) {
-            scanLogs.add("✅ 권한 허용됨 - 스캔 시작")
             startBleScan()
         } else {
-            scanLogs.add("❌ 권한 거부됨 - 설정에서 허용 필요")
+            statusText.value = "❌ 권한 거부됨 - 설정에서 허용 필요"
         }
     }
 
@@ -48,8 +60,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             ForterTheme {
                 ScanScreen(
-                    logs = scanLogs,
+                    devices = devices,
                     isScanning = isScanning.value,
+                    statusText = statusText.value,
                     onScanClick = {
                         if (isScanning.value) {
                             stopBleScan()
@@ -75,27 +88,39 @@ class MainActivity : ComponentActivity() {
     // ── 스캔 시작 ──────────────────────────────────────────────────────
     @SuppressLint("MissingPermission")
     private fun startBleScan() {
-        isScanning.value = true
-        scanLogs.add("🔍 스캔 중...")
+        devices.clear()
+        statusText.value = "🔍 스캔 중..."
 
         bleScanner.startScan(object : BleScanner.ScanListener {
-            override fun onDeviceFound(device: BluetoothDevice, rssi: Int) {
-                val name = device.name ?: "Unknown"
-                scanLogs.add("📡 발견: $name | ${device.address} | RSSI: $rssi")
+            override fun onDeviceFound(device: BluetoothDevice, name: String?, rssi: Int, isTarget: Boolean) {
+                val displayName = name ?: "(이름 없음)"
+                val idx = devices.indexOfFirst { it.address == device.address }
+                val entry = ScannedDevice(displayName, device.address, rssi, isTarget)
+                if (idx >= 0) {
+                    devices[idx] = entry
+                } else {
+                    devices.add(entry)
+                }
+                // 타겟(OBD) 먼저, 그다음 신호 센 순
+                devices.sortWith(
+                    compareByDescending<ScannedDevice> { it.isTarget }
+                        .thenByDescending { it.rssi }
+                )
             }
 
             override fun onScanStarted() {
-                scanLogs.add("▶ 스캔 시작됨")
+                isScanning.value = true
+                statusText.value = "🔍 스캔 중..."
             }
 
             override fun onScanStopped() {
                 isScanning.value = false
-                scanLogs.add("⏹ 스캔 종료")
+                statusText.value = "⏹ 스캔 종료 · ${devices.size}대 발견"
             }
 
             override fun onScanFailed(errorCode: Int) {
                 isScanning.value = false
-                scanLogs.add("❌ 스캔 실패 (코드: $errorCode)")
+                statusText.value = "❌ 스캔 실패 (코드: $errorCode)"
             }
         })
     }
@@ -118,8 +143,9 @@ class MainActivity : ComponentActivity() {
 // ── Compose UI ─────────────────────────────────────────────────────────────
 @Composable
 fun ScanScreen(
-    logs: List<String>,
+    devices: List<ScannedDevice>,
     isScanning: Boolean,
+    statusText: String,
     onScanClick: () -> Unit
 ) {
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -136,7 +162,6 @@ fun ScanScreen(
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
-            // 스캔 버튼
             Button(
                 onClick = onScanClick,
                 modifier = Modifier.fillMaxWidth()
@@ -144,24 +169,60 @@ fun ScanScreen(
                 Text(if (isScanning) "⏹ 스캔 중지" else "🔍 스캔 시작")
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // 로그 출력
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(logs.reversed()) { log ->
-                    Text(
-                        text = log,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 2.dp)
-                    )
-                    HorizontalDivider()
+                items(devices) { device ->
+                    DeviceRow(device)
                 }
             }
         }
+    }
+}
+
+@Composable
+fun DeviceRow(device: ScannedDevice) {
+    val bg = if (device.isTarget)
+        MaterialTheme.colorScheme.primaryContainer
+    else
+        MaterialTheme.colorScheme.surfaceVariant
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = (if (device.isTarget) "⭐ " else "") + device.name,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = if (device.isTarget) FontWeight.Bold else FontWeight.Normal
+            )
+            Text(
+                text = "${device.rssi} dBm",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        Text(
+            text = device.address,
+            style = MaterialTheme.typography.bodySmall
+        )
     }
 }
