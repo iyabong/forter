@@ -135,9 +135,11 @@ class ObdSppConnection {
             try {
                 speed = parseSpeed(send("010D", READ_TIMEOUT_MS))
                 rpm = parseRpm(send("010C", READ_TIMEOUT_MS))
+            } catch (e: InterruptedException) {
+                break                       // 사용자가 중지한 것 — 실패가 아니다
             } catch (e: Exception) {
                 errors++
-                log("⚠ ${e.message}")
+                log("⚠ ${e.javaClass.simpleName}: ${e.message ?: "(메시지 없음)"}")
                 if (!running) break
             }
 
