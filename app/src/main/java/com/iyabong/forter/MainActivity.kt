@@ -43,14 +43,14 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var bleScanner: BleScanner
     private lateinit var classicScanner: ClassicBtScanner
-    private val obdSpp = ObdSppConnection()
+    private lateinit var obdSpp: ObdSppConnection
 
     private val devices = mutableStateListOf<ScannedDevice>()
     private val logs = mutableStateListOf<String>()
     private val isScanning = mutableStateOf(false)
     private val activeMode = mutableStateOf<ScanSource?>(null)
     private val statusText = mutableStateOf("스캔을 시작하세요")
-    private val intervalMs = mutableStateOf(1000L)   // 화면에서 바꿀 수 있는 수집 주기
+    private val intervalMs = mutableStateOf(1000L)
 
     private var pendingMode: ScanSource? = null
 
@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
 
         bleScanner = BleScanner(this)
         classicScanner = ClassicBtScanner(this)
+        obdSpp = ObdSppConnection(this)
 
         setContent {
             ForterTheme {
@@ -92,7 +93,8 @@ class MainActivity : ComponentActivity() {
                     onBack = {
                         obdSpp.stop()
                         logs.clear()
-                        statusText.value = "스캔을 시작하세요"
+                        // 저장 결과를 onExported 가 덮어쓴다 — 여기서 초기화하면 결과를 못 본다
+                        statusText.value = "💾 저장 중..."
                     }
                 )
             }
@@ -147,6 +149,13 @@ class MainActivity : ComponentActivity() {
 
             override fun onStopped(reason: String) {
                 statusText.value = "⛔ $reason"
+            }
+
+            override fun onExported(csvName: String?, logName: String?) {
+                statusText.value = if (csvName != null)
+                    "💾 Downloads/Forter/$csvName"
+                else
+                    "⚠ 파일 저장 실패"
             }
         })
     }
@@ -269,7 +278,7 @@ fun MainScreen(
                 }
             }
 
-            // 수집 주기 — 재빌드 없이 차에서 바꿔가며 실측하기 위한 토글
+            // 수집 주기 — 재빌드 없이 차에서 바꿔가며 실측
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -316,7 +325,7 @@ private fun LogPanel(logs: List<String>, onBack: () -> Unit) {
     }
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("⏹ 중지하고 기기 목록으로")
+            Text("⏹ 중지하고 저장")
         }
         Spacer(Modifier.height(8.dp))
         LazyColumn(
