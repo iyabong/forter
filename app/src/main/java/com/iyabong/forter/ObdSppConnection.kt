@@ -5,26 +5,32 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.content.ContentValues
+import android.content.Context
+import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.RequiresPermission
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 /**
  * 클래식 SPP(RFCOMM)로 ELM327 어댑터에 연결한다.
  *
- * 1단계 목적은 데이터 저장이 아니라 실측이다.
- *  - PID 1회 왕복 ms
- *  - 설정한 주기 안에 사이클을 다 못 돈 횟수
- *  - 실패/타임아웃 비율
- *
- * 이 숫자가 나와야 PID를 몇 개까지 늘릴지 계산으로 정할 수 있다.
+ * 세션이 끝나면 Downloads/Forter 에 두 개의 파일을 남긴다.
+ *  - .csv : 시각, 속도, RPM, 사이클 ms  (분석용)
+ *  - .log : 초기화 로그와 에러          (진단용)
  */
-class ObdSppConnection {
+class ObdSppConnection(private val context: Context) {
 
     companion object {
         private const val TAG = "ObdSpp"
@@ -34,11 +40,11 @@ class ObdSppConnection {
 
     interface Listener {
         fun onLog(line: String)
-        /** 매 사이클 결과 */
         fun onSample(speedKmh: Int?, rpm: Int?, cycleMs: Long)
-        /** 누적 통계 */
         fun onStats(cycles: Int, avgCycleMs: Long, overruns: Int, errors: Int)
         fun onStopped(reason: String)
+        /** 파일 저장 결과 — 실패하면 두 값 모두 null */
+        fun onExported(csvName: String?, logName: String?)
     }
 
     private var socket: BluetoothSocket? = null
@@ -50,8 +56,14 @@ class ObdSppConnection {
     private val main = Handler(Looper.getMainLooper())
     private var listener: Listener? = null
 
+    // 세션 동안 메모리에 모았다가 끝날 때 한 번에 쓴다
+    private val logLines = mutableListOf<String>()
+    private val csvRows = mutableListOf<String>()
+    private var sessionStamp = ""
+
     private fun log(line: String) {
         Log.i(TAG, line)
+        logLines.add(line)
         main.post { listener?.onLog(line) }
     }
 
@@ -60,6 +72,10 @@ class ObdSppConnection {
         if (running) return
         listener = l
         running = true
+
+        logLines.clear()
+        csvRows.clear()
+        sessionStamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.KOREA).format(Date())
 
         worker = Thread { session(device, intervalMs) }.also { it.start() }
     }
@@ -76,14 +92,12 @@ class ObdSppConnection {
     @SuppressLint("MissingPermission")
     private fun session(device: BluetoothDevice, intervalMs: Long) {
         try {
-            // 탐색 중이면 연결이 매우 느려지거나 실패한다
             BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery()
 
             log("RFCOMM 연결 시도: ${device.address}")
             val s = try {
                 device.createRfcommSocketToServiceRecord(SPP_UUID).also { it.connect() }
             } catch (e: IOException) {
-                // 클론 어댑터가 SDP 조회에 실패할 때 쓰는 우회로 (채널 1 직접)
                 log("표준 연결 실패, 채널 1로 재시도: ${e.message}")
                 val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
                 (m.invoke(device, 1) as BluetoothSocket).also { it.connect() }
@@ -98,31 +112,34 @@ class ObdSppConnection {
             pollLoop(intervalMs)
 
         } catch (e: Exception) {
-            log("❌ ${e.javaClass.simpleName}: ${e.message}")
+            log("❌ ${e.javaClass.simpleName}: ${e.message ?: "(메시지 없음)"}")
             main.post { listener?.onStopped(e.message ?: "오류") }
         } finally {
             running = false
             closeQuietly()
+            exportFiles()
         }
     }
 
     // ── ELM327 초기화 ──────────────────────────────────────────────────
     private fun initElm() {
-        // ATZ: 리셋 (부팅에 시간이 걸려 타임아웃을 길게)
         send("ATZ", 3000)
-        send("ATE0", 1000)   // 에코 끄기 — 안 끄면 응답에 명령이 섞여 온다
+        send("ATE0", 1000)   // 에코 끄기
         send("ATL0", 1000)   // 줄바꿈 끄기
-        send("ATS0", 1000)   // 공백 끄기 → 파싱이 단순해진다
+        send("ATS0", 1000)   // 공백 끄기
         send("ATSP0", 3000)  // 프로토콜 자동 감지
         log("── 초기화 완료 ──")
     }
 
-    // ── 1초 루프 ───────────────────────────────────────────────────────
+    // ── 폴링 루프 ──────────────────────────────────────────────────────
     private fun pollLoop(intervalMs: Long) {
         var cycles = 0
         var overruns = 0
         var errors = 0
         var totalMs = 0L
+        val recent = ArrayDeque<Long>()          // 최근 20 사이클
+
+        val rowTime = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
 
         log("── 측정 시작 (주기 ${intervalMs}ms) ──")
 
@@ -136,7 +153,7 @@ class ObdSppConnection {
                 speed = parseSpeed(send("010D", READ_TIMEOUT_MS))
                 rpm = parseRpm(send("010C", READ_TIMEOUT_MS))
             } catch (e: InterruptedException) {
-                break                       // 사용자가 중지한 것 — 실패가 아니다
+                break                            // 사용자가 중지한 것 — 실패가 아니다
             } catch (e: Exception) {
                 errors++
                 log("⚠ ${e.javaClass.simpleName}: ${e.message ?: "(메시지 없음)"}")
@@ -148,12 +165,21 @@ class ObdSppConnection {
             totalMs += cycleMs
             if (cycleMs > intervalMs) overruns++
 
+            recent.addLast(cycleMs)
+            if (recent.size > 20) recent.removeFirst()
+
+            csvRows.add(
+                "$started,${rowTime.format(Date(started))},${speed ?: ""},${rpm ?: ""},$cycleMs"
+            )
+
             main.post { listener?.onSample(speed, rpm, cycleMs) }
 
             if (cycles % 5 == 0) {
                 val avg = totalMs / cycles
+                val recentAvg = recent.average().toLong()
                 val c = cycles; val o = overruns; val er = errors
                 main.post { listener?.onStats(c, avg, o, er) }
+                logLines.add("최근 ${recentAvg}ms · 누적 ${avg}ms · ${c}사이클 · 초과 $o · 실패 $er")
             }
 
             val remain = intervalMs - cycleMs
@@ -167,10 +193,69 @@ class ObdSppConnection {
         main.post { listener?.onStopped("정상 종료") }
     }
 
+    // ── 파일 저장 ──────────────────────────────────────────────────────
+    private fun exportFiles() {
+        Thread.interrupted()                     // 인터럽트 플래그를 지워야 파일 IO가 안전하다
+
+        if (csvRows.isEmpty() && logLines.isEmpty()) {
+            main.post { listener?.onExported(null, null) }
+            return
+        }
+
+        val csvName = "forter_$sessionStamp.csv"
+        val logName = "forter_$sessionStamp.log"
+
+        val csv = buildString {
+            appendLine("epoch_ms,local_time,speed_kmh,rpm,cycle_ms")
+            csvRows.forEach { appendLine(it) }
+        }
+        val logText = logLines.joinToString("\n")
+
+        val okCsv = writeFile(csvName, "text/csv", csv)
+        val okLog = writeFile(logName, "text/plain", logText)
+
+        main.post {
+            listener?.onExported(
+                if (okCsv) csvName else null,
+                if (okLog) logName else null
+            )
+        }
+    }
+
+    private fun writeFile(fileName: String, mime: String, content: String): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Downloads/Forter — 권한 없이 쓸 수 있고 파일 앱에서 바로 보인다
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/Forter"
+                )
+            }
+            val uri = context.contentResolver
+                .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            if (uri == null) false
+            else {
+                context.contentResolver.openOutputStream(uri)?.use {
+                    it.write(content.toByteArray(Charsets.UTF_8))
+                }
+                true
+            }
+        } else {
+            // 구버전 대비 — 앱 전용 폴더
+            val dir = context.getExternalFilesDir(null) ?: return false
+            File(dir, fileName).writeText(content, Charsets.UTF_8)
+            true
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "파일 저장 실패: ${e.message}")
+        false
+    }
+
     // ── 송수신 ─────────────────────────────────────────────────────────
     private fun send(cmd: String, timeoutMs: Long): String {
         val out = output ?: throw IOException("소켓 없음")
-        // 남은 찌꺼기 비우기
         input?.let { while (it.available() > 0) it.read(ByteArray(it.available())) }
 
         out.write("$cmd\r".toByteArray())
@@ -181,7 +266,6 @@ class ObdSppConnection {
         return res
     }
 
-    /** '>' 프롬프트가 올 때까지 읽는다. ELM327은 응답 끝에 항상 이걸 보낸다. */
     private fun readUntilPrompt(timeoutMs: Long): String {
         val ins = input ?: throw IOException("소켓 없음")
         val sb = StringBuilder()
@@ -204,8 +288,7 @@ class ObdSppConnection {
         throw IOException("타임아웃 (받은 것: ${sb.toString().trim()})")
     }
 
-    // ── 파싱 ───────────────────────────────────────────────────────────
-    // ATS0 으로 공백을 껐으므로 "410D32" 형태로 온다
+    // ── 파싱 (ATS0 로 공백을 껐으므로 "410D32" 형태) ───────────────────
     private fun parseSpeed(raw: String): Int? {
         val hex = raw.replace(" ", "").uppercase()
         val i = hex.indexOf("410D")
