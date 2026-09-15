@@ -139,7 +139,7 @@ class ObdSppConnection(private val context: Context) {
         var totalMs = 0L
         val recent = ArrayDeque<Long>()          // 최근 20 사이클
 
-        val rowTime = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
+        val rowTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.KOREA)
 
         log("── 측정 시작 (주기 ${intervalMs}ms) ──")
 
@@ -169,7 +169,8 @@ class ObdSppConnection(private val context: Context) {
             if (recent.size > 20) recent.removeFirst()
 
             csvRows.add(
-                "$started,${rowTime.format(Date(started))},${speed ?: ""},${rpm ?: ""},$cycleMs"
+                "$cycles,$started,${rowTime.format(Date(started))}," +
+                    "${speed ?: ""},${rpm ?: ""},$cycleMs"
             )
 
             main.post { listener?.onSample(speed, rpm, cycleMs) }
@@ -206,7 +207,7 @@ class ObdSppConnection(private val context: Context) {
         val logName = "forter_$sessionStamp.log"
 
         val csv = buildString {
-            appendLine("epoch_ms,local_time,speed_kmh,rpm,cycle_ms")
+            appendLine("cycle,epoch_ms,local_time,speed_kmh,rpm,cycle_ms")
             csvRows.forEach { appendLine(it) }
         }
         val logText = logLines.joinToString("\n")
