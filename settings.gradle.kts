@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Forter"
 include(":app")
+ 
