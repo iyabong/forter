@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.iyabong.forter.bluetooth.SppConnection
 import com.iyabong.forter.bluetooth.loadBondedDevices
+import com.iyabong.forter.obd.Elm327
 import com.iyabong.forter.ui.DeviceSelectScreen
 import com.iyabong.forter.ui.theme.ForterTheme
 import kotlinx.coroutines.launch
@@ -72,9 +73,17 @@ class MainActivity : ComponentActivity() {
                                     try {
                                         status = "연결 중: ${device.name}"
                                         conn.connect()
-                                        status = "ATZ 전송..."
-                                        val response = conn.send("ATZ")
-                                        status = "응답:\n$response"
+                                        val elm = Elm327(conn)
+
+                                        status = "초기화 중"
+                                        elm.init()
+
+                                        status = "프로토콜 탐색 중"
+                                        val supported = elm.raw("0100", timeoutMs = 10000)
+                                        val rpm = elm.rpm()
+                                        val speed = elm.speed()
+
+                                        status = "0100: $supported\nRPM: $rpm\n속도: $speed km/h"
                                     } catch (e: Exception) {
                                         status = "실패: ${e.message}"
                                     } finally {
