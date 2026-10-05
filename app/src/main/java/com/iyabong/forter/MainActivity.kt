@@ -83,7 +83,8 @@ class MainActivity : ComponentActivity() {
                                         val rpm = elm.rpm()
                                         val speed = elm.speed()
 
-                                        status = "0100: $supported\nRPM: $rpm\n속도: $speed km/h"
+                                        status = "연결: ${device.name} (${device.address})\n"
+                                        status += "0100: $supported\nRPM: $rpm\n속도: $speed km/h"
                                     } catch (e: Exception) {
                                         status = "실패: ${e.message}"
                                     } finally {
