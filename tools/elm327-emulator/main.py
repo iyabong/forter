@@ -10,7 +10,8 @@ OBD 응답: Wikipedia "OBD-II PIDs" 표(Service 01)의 공식을 거꾸로 적�
 확인: python -u main.py --pids    # 연결 없이 응답 표만 출력
 """
 
-import sys
+import argparse
+import time
 import serial
 
 PORT = "COM4"
@@ -93,7 +94,7 @@ def handle_obd(cmd):
 
 def handle_at(cmd):
     if cmd in ("ATZ", "ATI"):
-        return "ELM v2.3"
+        return "ELM327 v2.3"
     if cmd == "ATRV":
         return f"{state['voltage']:.1f}V"
     return "OK"             # ATE0, ATL0, ATS0, ATH0, ATSP0 등
@@ -127,11 +128,13 @@ def print_pids():
         cmd = f"01{pid:02X}"
         print(f"{cmd:<9} {reply_for(cmd):<14} {str(encode(state[key])):<17} {name} = {state[key]}")
 
-def serve():
+def serve(args):
     port = serial.Serial(PORT, timeout=1)   # 1초마다 read가 빠져나와서 Ctrl + C가 먹힘
     print(f"{PORT} 열림, 폰 연결 대기 중...")
 
     buf = b""
+    obd_count = 0                                   # 무응답 전까지 응답한 OBD 명령 수 (AT 제외)
+    hang_start = None                               # 무응답 시작 시각, None = 정상
     while True:
         data = port.read(1)                         # 1바이트 읽기, 없으면 1초 후 b"" 반환
         if not data:
@@ -141,14 +144,47 @@ def serve():
             buf = b""
             if not cmd:
                 continue
+
+            # 무응답 중: AT 포함 전부 무시 (전원 꺼진 어댑터처럼)
+            if hang_start is not None:
+                if args.hang_for and time.monotonic() - hang_start >= args.hang_for:
+                    hang_start = None
+                    obd_count = 0
+                    print("--- 무응답 끝 ---")
+                else:
+                    print(f"받음: {cmd:<6} → (무응답)")
+                    continue
+
+            # 무응답 진입
+            if not cmd.upper().startswith("AT"):
+                obd_count += 1
+                if args.hang_after and obd_count > args.hang_after:
+                    hang_start = time.monotonic()
+                    print(f"--- 무응답 시작: OBD {args.hang_after}개 응답 후 ---")
+                    print(f"받음: {cmd:<6} → (무응답")
+                    continue
+
+            if args.delay:
+                time.sleep(args.delay / 1000)
+
             resp = reply_for(cmd)
             port.write(f"{resp}\r\r>".encode())     # 응답 끝에 > 프롬프트
             print(f"받음: {cmd:<6} → 보냄: {resp}")
         else:
             buf += data
 
+def get_options():
+    p = argparse.ArgumentParser(description="ELM327 에뮬레이터")
+    p.add_argument("--pids", action="store_true", help="연결 없이 응답 표만 출력")
+    p.add_argument("--delay", type=int, default=0, metavar="MS", help="응답 전 지연(ms)")
+    p.add_argument("--hang-after", type=int, default=0, metavar="N", help="OBD 명령 N개 응답 후 무응답(0 = 끔)")
+    p.add_argument("--hang-for", type=float, default=0, metavar="SEC", help="무응답 유지 시간 (초, 0 = 계속)")
+
+    return p.parse_args()
+
 if __name__ == "__main__":
-    if "--pids" in sys.argv:
+    args = get_options()
+    if args.pids:
         print_pids()
     else:
-        serve()
+        serve(args)
